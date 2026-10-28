@@ -53,7 +53,7 @@ cat > "$APPLICATIONS_DIR/$APP_ID.desktop" <<EOF
 Version=1.0
 Type=Application
 Name=Sesli Asistan
-Comment=Türkçe sesli komut asistanı
+Comment=Çok dilli sesli komut asistanı
 Exec="$APP_DIR/launch.sh"
 TryExec=$APP_DIR/launch.sh
 Icon=$APP_ID
@@ -82,4 +82,7 @@ if command -v gio >/dev/null 2>&1; then
 fi
 
 echo "Kurulum tamamlandı. Sesli Asistan masaüstüne ve uygulama menüsüne eklendi."
-echo "İlk açılışta konuşma tanıma ve Türkçe ses modellerinin indirilmesi gerekebilir."
+echo "İlk açılışta konuşma tanıma modeli ve konuşulan dile ait ses modeli indirilebilir."
+if ! command -v espeak-ng >/dev/null 2>&1; then
+    echo "Piper'da sesi bulunmayan diller için: sudo apt install espeak-ng"
+fi

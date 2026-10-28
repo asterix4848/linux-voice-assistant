@@ -15,6 +15,7 @@ import random
 import math
 import ctypes
 import ctypes.util
+import unicodedata
 import urllib.error
 import urllib.request
 
@@ -22,11 +23,23 @@ import urllib.request
 APP_TITLE = "Sesli Asistan — Linux"
 SAMPLE_RATE = 16_000
 RECORD_SECONDS = 5
-PIPER_VOICE = "tr_TR-dfki-medium"
+PIPER_DEFAULT_VOICE = "tr_TR-dfki-medium"
 PIPER_DATA_DIR = Path.home() / ".local" / "share" / "linux-voice-assistant" / "voices"
-PIPER_MODEL_PATH = PIPER_DATA_DIR / f"{PIPER_VOICE}.onnx"
+PIPER_CATALOG_PATH = PIPER_DATA_DIR / "voices.json"
+PIPER_CATALOG_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
 CHAT_MODEL = "qwen3:1.7b"
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
+WAKE_WORDS = {
+    "bilgisayar", "computer", "assistant", "asistente", "assistente", "ordinateur",
+    "computadora", "ordenador", "computador", "assistent", "ассистент", "компьютер",
+    "助手", "アシスタント", "컴퓨터", "مساعد", "كمبيوتر",
+}
+STOP_PHRASES = {
+    "dur", "stop", "stop listening", "halt", "parar", "detener", "arrete",
+    "arrête", "stopp", "остановись", "停止", "停止聆聽", "그만", "그만 들어",
+}
+YES_WORDS = {"evet", "yes", "oui", "sí", "si", "ja", "sim", "да", "是", "はい", "네", "نعم"}
+NO_WORDS = {"hayır", "hayir", "no", "non", "nein", "não", "nao", "нет", "不", "いいえ", "아니요", "لا"}
 
 
 def normalize(text: str) -> str:
@@ -38,6 +51,10 @@ def normalize(text: str) -> str:
         "ş": "s",
         "ü": "u",
     }))
+    text = "".join(
+        character for character in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(character)
+    )
     return " ".join("".join(c if c.isalnum() or c.isspace() else " " for c in text).split())
 
 
@@ -50,7 +67,9 @@ class VoiceAssistant:
         self.root.configure(bg="#020804")
         self._setup_matrix_style()
         self.model = None
-        self.tts_ready = False
+        self.last_detected_language = "tr"
+        self.piper_voice_catalog: dict[str, dict] | None = None
+        self.tts_voices: dict[str, object] = {}
         self.busy = False
         self.continuous_listening = threading.Event()
         self.chat_history: list[dict[str, str]] = []
@@ -514,7 +533,13 @@ class VoiceAssistant:
                 command = self._canonical_action(normalize(text))
                 if command:
                     self._post_status("Komutu duydum. Eylem düğmesine basarak çalıştırabilirsin.")
-                    self._speak_or_report(f"Şunu duydum: {text}. Eylemi çalıştırmak için düğmeye bas.")
+                    if self.last_detected_language.startswith("en"):
+                        self._speak_or_report(
+                            f"I heard: {text}. I understood you want to {self._describe_action(command)}. "
+                            "Press Run Action to continue."
+                        )
+                    else:
+                        self._speak_or_report(f"Şunu duydum: {text}. Eylemi çalıştırmak için düğmeye bas.")
                 else:
                     self._post_status("Yerel sohbet modeli cevap hazırlıyor…")
                     reply = self._chat_reply(text)
@@ -531,7 +556,7 @@ class VoiceAssistant:
 
     def _ensure_model(self) -> None:
         if self.model is None:
-            self._post_status("Türkçe konuşma modeli hazırlanıyor…")
+            self._post_status("Çok dilli konuşma modeli hazırlanıyor…")
             from faster_whisper import WhisperModel
 
             self.model = WhisperModel("base", device="cpu", compute_type="int8")
@@ -575,16 +600,11 @@ class VoiceAssistant:
         self._post_status("Konuşma yazıya çevriliyor…")
         self._set_elapsed_phase("DÜŞÜNME")
         try:
-            segments, _info = self.model.transcribe(
-                recording_path,
-                language="tr",
-                beam_size=3,
-                vad_filter=True,
-                initial_prompt=prompt or (
-                    "Bilgisayar komutları: İndirilenleri aç. Ev klasörünü aç. "
-                    "Ana klasörü aç. Hesap makinesini aç. Bilgisayar. Evet. Hayır."
-                ),
-            )
+            options = {"beam_size": 3, "vad_filter": True}
+            if prompt:
+                options["initial_prompt"] = prompt
+            segments, info = self.model.transcribe(recording_path, **options)
+            self.last_detected_language = getattr(info, "language", None) or "unknown"
             return " ".join(segment.text.strip() for segment in segments).strip()
         finally:
             self._set_elapsed_phase("DÜŞÜNME")
@@ -759,18 +779,23 @@ class VoiceAssistant:
                 if not normalized:
                     self._stop_elapsed_timer()
                     continue
-                stop_phrases = ("dur", "dinlemeyi durdur", "asistan dur", "bilgisayar dur", "bilgisayar dinlemeyi durdur")
-                if normalized in stop_phrases or "dinlemeyi durdur" in normalized or "bilgisayar dur" in normalized:
+                if any(normalize(phrase) in normalized for phrase in STOP_PHRASES):
                     self.continuous_listening.clear()
-                    self._speak_or_report("Dinlemeyi durdurdum.")
+                    self._speak_or_report(
+                        "Listening stopped." if self.last_detected_language.startswith("en") else "Dinlemeyi durdurdum."
+                    )
                     break
 
                 self._post_status(f"Duydum: {heard}")
-                command_text = " ".join(word for word in normalized.split() if word != "bilgisayar")
+                words = normalized.split()
+                wake_detected = any(word in WAKE_WORDS for word in words) or any(
+                    wake_word in normalized for wake_word in WAKE_WORDS if not wake_word.isascii()
+                )
+                command_text = " ".join(word for word in words if word not in WAKE_WORDS)
                 command = self._canonical_action(command_text)
                 self.root.after(0, lambda t=heard: self._show_transcript(t))
                 if command is None:
-                    if "bilgisayar" in normalized.split():
+                    if wake_detected:
                         self._post_status("Yerel sohbet modeli cevap hazırlıyor…")
                         try:
                             reply = self._chat_reply(heard)
@@ -780,34 +805,48 @@ class VoiceAssistant:
                         self._post_status(f"Asistan: {reply}")
                         self._speak_or_report(reply)
                     else:
-                        self._speak_or_report(f"Şunu duydum: {heard}. Ne la?")
+                        self._post_status(f"Seslenme bekleniyor: {heard}")
                     continue
 
-                self._speak_or_report(
-                    f"Şunu duydum: {heard}. {self._describe_action(command)} olarak anladım. "
-                    "Onaylamak için evet, iptal etmek için hayır de."
-                )
+                if self.last_detected_language.startswith("en"):
+                    confirmation_prompt = (
+                        f"I heard: {heard}. I understood you want to {self._describe_action(command)}. "
+                        "Say yes to confirm or no to cancel."
+                    )
+                else:
+                    confirmation_prompt = (
+                        f"Şunu duydum: {heard}. {self._describe_action(command)} olarak anladım. "
+                        "Onaylamak için evet, iptal etmek için hayır de."
+                    )
+                self._speak_or_report(confirmation_prompt)
                 if not self.continuous_listening.is_set():
                     self._stop_elapsed_timer()
                     break
                 self._post_status(f"Onay bekliyorum: {RECORD_SECONDS} saniye içinde evet veya hayır de.")
                 confirmation_audio = self._capture_audio()
                 try:
-                    confirmation = normalize(
-                        self._transcribe(confirmation_audio, prompt="Türkçe kısa yanıt. Evet. Hayır. Dinlemeyi durdur.")
-                    )
+                    confirmation = normalize(self._transcribe(confirmation_audio))
                 finally:
                     self._delete_recording(confirmation_audio)
 
                 if not self.continuous_listening.is_set():
                     break
-                if "evet" in confirmation.split():
+                if any(word in confirmation.split() for word in YES_WORDS):
                     result = self._execute_action(command)
                     self._post_status(result)
-                    self._speak_or_report(result)
-                elif "hayir" in confirmation.split():
+                    if self.last_detected_language.startswith("en"):
+                        if result.startswith("Açıldı:"):
+                            spoken_result = f"Opened: {self._describe_action(command)}."
+                        elif result == "Hesap makinesi açıldı.":
+                            spoken_result = "Calculator opened."
+                        else:
+                            spoken_result = "I could not complete that action."
+                    else:
+                        spoken_result = result
+                    self._speak_or_report(spoken_result)
+                elif any(word in confirmation.split() for word in NO_WORDS):
                     self._post_status("Komut iptal edildi.")
-                    self._speak_or_report("Komutu iptal ettim.")
+                    self._speak_or_report("I cancelled the request." if self.last_detected_language.startswith("en") else "Komutu iptal ettim.")
                 else:
                     self._post_status("Onay alamadım; komutu çalıştırmadım.")
                     self._speak_or_report("Onay alamadım. Komutu çalıştırmadım.")
@@ -832,10 +871,11 @@ class VoiceAssistant:
         system_message = {
             "role": "system",
             "content": (
-                "Sen Linux Mint bilgisayarındaki yerel Türkçe sesli asistansın. "
-                "Türkçe, sıcak ve doğal konuş; cevaplarını sesli dinlemeye uygun kısa tut. "
-                "Kullanıcının bilgisayarında eylem yaptığını iddia etme ve komut çalıştırma. "
-                "Bilgisayar eylemleri uygulamanın izinli seçenekleriyle yapılır ve kullanıcı onayı gerekir."
+                "You are the user's local voice assistant on Linux Mint. "
+                f"The latest speech was detected as language code '{self.last_detected_language}'. "
+                "Reply naturally in the same language the user just spoke, and keep the reply concise for speech. "
+                "Do not claim to have performed computer actions and do not execute commands. "
+                "Desktop actions are restricted to the app's allowed choices and require user confirmation."
             ),
         }
         messages = [system_message, *self.chat_history, {"role": "user", "content": user_text}]
@@ -875,40 +915,115 @@ class VoiceAssistant:
         self.chat_history = self.chat_history[-12:]
         return reply
 
+    def _load_piper_catalog(self) -> dict[str, dict]:
+        if self.piper_voice_catalog is not None:
+            return self.piper_voice_catalog
+        PIPER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        catalog: dict[str, dict] = {}
+        if PIPER_CATALOG_PATH.exists() and time.time() - PIPER_CATALOG_PATH.stat().st_mtime < 30 * 86400:
+            try:
+                catalog = json.loads(PIPER_CATALOG_PATH.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                catalog = {}
+        if not catalog:
+            try:
+                request = urllib.request.Request(PIPER_CATALOG_URL, headers={"User-Agent": APP_TITLE})
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    catalog = json.loads(response.read().decode("utf-8"))
+                PIPER_CATALOG_PATH.write_text(json.dumps(catalog), encoding="utf-8")
+            except (OSError, urllib.error.URLError, json.JSONDecodeError):
+                catalog = {}
+        self.piper_voice_catalog = catalog
+        return catalog
+
+    def _piper_voice_for_language(self, language: str) -> str | None:
+        catalog = self._load_piper_catalog()
+        family = language.split("-")[0].split("_")[0].casefold()
+        candidates = [
+            voice_id for voice_id, details in catalog.items()
+            if details.get("language", {}).get("family", "").casefold() == family
+        ]
+        if not candidates:
+            if family == "tr":
+                return PIPER_DEFAULT_VOICE
+            return None
+        if family == "tr" and PIPER_DEFAULT_VOICE in candidates:
+            return PIPER_DEFAULT_VOICE
+        quality_rank = {"medium": 0, "high": 1, "low": 2, "x_low": 3}
+        candidates.sort(key=lambda voice_id: (
+            quality_rank.get(catalog[voice_id].get("quality", ""), 9),
+            "US" not in voice_id,
+            voice_id,
+        ))
+        return candidates[0]
+
+    def _load_piper_voice(self, voice_id: str):
+        if voice_id in self.tts_voices:
+            voice = self.tts_voices.pop(voice_id)
+            self.tts_voices[voice_id] = voice
+            return voice
+        model_path = PIPER_DATA_DIR / f"{voice_id}.onnx"
+        if not model_path.exists():
+            self._post_status(f"{voice_id.split('-')[0]} için Piper sesi indiriliyor…")
+            PIPER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            download = subprocess.run(
+                [sys.executable, "-m", "piper.download_voices", "--download-dir", str(PIPER_DATA_DIR), voice_id],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if download.returncode != 0 or not model_path.exists():
+                detail = download.stderr.strip() or download.stdout.strip()
+                raise RuntimeError(detail or f"Piper sesi indirilemedi: {voice_id}")
+        from piper import PiperVoice
+
+        voice = PiperVoice.load(str(model_path))
+        while len(self.tts_voices) >= 2:
+            self.tts_voices.pop(next(iter(self.tts_voices)))
+        self.tts_voices[voice_id] = voice
+        return voice
+
+    @staticmethod
+    def _espeak_voice(language: str) -> str | None:
+        executable = shutil.which("espeak-ng")
+        if not executable:
+            return None
+        aliases = {"jw": "jv", "zh": "zh", "yue": "yue", "no": "no"}
+        requested = aliases.get(language, language)
+        try:
+            result = subprocess.run([executable, "--voices"], capture_output=True, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        voices = [line.split()[1] for line in result.stdout.splitlines()[1:] if len(line.split()) > 1]
+        matches = [voice for voice in voices if voice == requested or voice.startswith(requested + "-")]
+        return matches[0] if matches else None
+
     def _speak(self, text: str) -> None:
-        if not self.tts_ready:
-            if not PIPER_MODEL_PATH.exists():
-                self._post_status("Türkçe doğal ses modeli indiriliyor (ilk kullanım)…")
-                PIPER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-                download = subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "piper.download_voices",
-                        "--download-dir",
-                        str(PIPER_DATA_DIR),
-                        PIPER_VOICE,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if download.returncode != 0:
-                    detail = download.stderr.strip() or download.stdout.strip()
-                    raise RuntimeError(detail or "Türkçe ses modeli indirilemedi.")
-            from piper import PiperVoice
-
-            self.tts_voice = PiperVoice.load(str(PIPER_MODEL_PATH))
-            self.tts_ready = True
-
         player = shutil.which("pw-play") or shutil.which("aplay")
         if not player:
             raise RuntimeError("Ses oynatıcı bulunamadı. 'pipewire-bin' paketinin kurulu olduğunu kontrol et.")
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as audio_file:
             audio_path = audio_file.name
         try:
-            with wave.open(audio_path, "wb") as wav_file:
-                self.tts_voice.synthesize_wav(text, wav_file)
+            language = self.last_detected_language
+            voice_id = self._piper_voice_for_language(language)
+            if voice_id:
+                try:
+                    voice = self._load_piper_voice(voice_id)
+                    with wave.open(audio_path, "wb") as wav_file:
+                        voice.synthesize_wav(text, wav_file)
+                except Exception:
+                    if language == "tr":
+                        raise
+                    voice_id = None
+            if not voice_id:
+                espeak = shutil.which("espeak-ng")
+                voice = self._espeak_voice(language)
+                if not espeak or not voice:
+                    raise RuntimeError(
+                        f"{language} için yerel ses bulunamadı. Piper'da veya espeak-ng'de o dilin sesini kur."
+                    )
+                subprocess.run([espeak, "-v", voice, "-w", audio_path, text], capture_output=True, text=True, check=True)
             subprocess.run([player, audio_path], capture_output=True, text=True, check=True)
         finally:
             try:
@@ -977,7 +1092,7 @@ class VoiceAssistant:
             self.set_status("Önce konuşmayı yazıya çevir veya kutuya metin yaz.")
             return
         self.repeat_button.configure(state="disabled")
-        self.set_status("Daha doğal Türkçe sesle okuyorum…")
+        self.set_status(f"Metni {self.last_detected_language} dilinde seslendiriyorum…")
         threading.Thread(target=self._speak_text, args=(text,), daemon=True).start()
 
     def _speak_text(self, text: str) -> None:
@@ -1004,6 +1119,19 @@ class VoiceAssistant:
     @staticmethod
     def _canonical_action(text: str) -> str | None:
         words = set(text.split())
+        english_actions = {
+            "open home folder": "ev klasorunu ac",
+            "open the home folder": "ev klasorunu ac",
+            "open home directory": "ev klasorunu ac",
+            "open my home folder": "ev klasorunu ac",
+            "open downloads": "indirilenleri ac",
+            "open downloads folder": "indirilenleri ac",
+            "open the downloads folder": "indirilenleri ac",
+            "open calculator": "hesap makinesini ac",
+            "open the calculator": "hesap makinesini ac",
+        }
+        if text in english_actions:
+            return english_actions[text]
         if any(word.startswith("indir") for word in words):
             return "indirilenleri ac"
         if "hesap" in words and any(word.startswith("makine") for word in words):
@@ -1026,8 +1154,16 @@ class VoiceAssistant:
                 return f"uygulama:{target}"
         return None
 
-    @staticmethod
-    def _describe_action(command: str) -> str:
+    def _describe_action(self, command: str) -> str:
+        if self.last_detected_language.startswith("en"):
+            if command.startswith("uygulama:"):
+                return f"open the {command.removeprefix('uygulama:').strip()} application"
+            return {
+                "ev klasorunu ac": "open the Home folder",
+                "ana klasoru ac": "open the Home folder",
+                "indirilenleri ac": "open the Downloads folder",
+                "hesap makinesini ac": "open the calculator",
+            }.get(command, command)
         if command.startswith("uygulama:"):
             return f"{command.removeprefix('uygulama:')} uygulamasını aç"
         return command

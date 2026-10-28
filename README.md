@@ -1,18 +1,21 @@
 # Sesli Asistan — Linux
 
-Linux Mint için Matrix tarzı yeşil kod animasyonlu Türkçe sesli asistan. Mikrofon kaydı, konuşma tanıma, sohbet modeli ve seslendirme bilgisayarda yerel çalışır. Sohbet için Ollama üzerinden Qwen3 1.7B kullanılır.
+Linux Mint için Matrix tarzı yeşil kod animasyonlu çok dilli sesli asistan. Faster Whisper konuşulan dili otomatik algılar; yerel Qwen3 modeli yanıtı aynı dilde üretmeye çalışır. Ses kaydı, konuşma tanıma, sohbet modeli ve seslendirme bilgisayarda yerel çalışır.
 
 ## Şu anki işlevler
 
 - Uygulama açılınca sürekli dinlemeye başlama; mikrofonu 5 saniyelik bölümlerle kullanma.
+- Faster Whisper'ın desteklediği dillerde otomatik konuşma tanıma; kullanıcı arayüzü şu an Türkçedir.
+- Sohbet yanıtlarını algılanan konuşma dilinde verme (Qwen3 modelinin dil başarımı değişebilir).
+- Algılanan dil için Piper kataloğunda bir ses varsa onu kullanma; Piper sesi yoksa `espeak-ng` sesini deneme.
 - Küçük, daire biçimli ve masaüstünde taşınabilir asistan penceresi.
 - Daire içinde duyulan metin, dinleme halkası ve dinleme/düşünme/cevap sayaçları.
 - Kayıt sırasında kalan saniyeyi yüzdelik halka ile gösterme.
 - Dinleme, düşünme ve cevap verme sürelerini ayrı ayrı gösteren sayaç.
 - Linux'un varsayılan ses girişinden (PipeWire) kayıt alma; Bluetooth mikrofonu Linux ayarlarından seçilir.
 - Tanınan metni ekranda gösterip düzeltme.
-- Tanınan metni otomatik olarak Piper'ın Türkçe sesiyle tekrar etme; ayrıca tekrar düğmesi.
-- “Bilgisayar” diye seslenince yerel sohbet modeliyle Türkçe sohbet etme.
+- Tanınan metni algılanan dilin sesiyle okuma; ayrıca tekrar düğmesi.
+- “Bilgisayar”, “computer”, “assistant” ve bazı dillerdeki eşdeğer seslenmelerle yerel sohbet başlatma.
 - **Eylemi çalıştır** düğmesine basınca şu dosya/hesap makinesi eylemlerini yürütme:
   - “Ev klasörünü aç”
   - “İndirilenleri aç”
@@ -52,7 +55,7 @@ Linux Mint'te önce kulaklığı Bluetooth ile bağla. **Ses ayarları → Giri�
 Terminalde proje klasörüne geçtikten sonra:
 
 ```bash
-sudo apt install python3-tk python3-venv pipewire-bin
+sudo apt install python3-tk python3-venv pipewire-bin espeak-ng
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
@@ -60,14 +63,14 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-İlk çalıştırmada konuşma tanıma modeli ve Türkçe Piper sesi için internet bağlantısı gerekir. İndirmeler tamamlandıktan sonra ses kaydı, tanıma, sohbet ve seslendirme yerel yapılır. Piper'ın `tr_TR-dfki-medium` modeli ilk sesli okumada `~/.local/share/linux-voice-assistant/voices/` klasörüne indirilir. PyAV sürümü faster-whisper ile uyumlu kalması için 19'dan eski sürümle sınırlandırılır. Uygulamayı kullanırken Codex CLI gerekmez.
+İlk çalıştırmada konuşma tanıma modeli için internet bağlantısı gerekir. Piper, konuşulan dildeki sesi ilk ihtiyaç olduğunda indirir; Piper kataloğunda o dil için ses yoksa sistemde kurulu `espeak-ng` sesi kullanılır. Sesler yerel çalışır. eSpeak sesleri daha robotik duyulabilir ve Whisper'ın tanıdığı her dil için Piper veya eSpeak sesi bulunmayabilir. PyAV sürümü faster-whisper ile uyumlu kalması için 19'dan eski sürümle sınırlandırılır. Uygulamayı kullanırken Codex CLI gerekmez.
 
 ## Kullanım
 
 1. Linux Ses ayarlarından Bluetooth kulaklık mikrofonunu varsayılan giriş olarak seç.
 2. “Konuş ve yazıya çevir” düğmesine basıp komutu söyle.
 3. Tanınan metni kontrol et veya düzelt. Komut adları tanıma modeline ipucu olarak verilir.
-4. “Metni sesli tekrar et” düğmesiyle tanınan cümleyi Türkçe dinle.
+4. “Metni sesli tekrar et” düğmesiyle tanınan cümleyi algılanan dilde dinle.
 5. Yalnızca yukarıdaki üç komuttan biriyse “Eylemi çalıştır” düğmesine bas.
 
 ## Sonraki geliştirme adımları
@@ -82,6 +85,6 @@ Fikir, hata bildirimi ve kod katkıları memnuniyetle karşılanır. Önce bir G
 
 ## Sürekli dinleme modu
 
-Uygulama açıldığında konuşma modeli hazırlanır ve asistan hazır olduğunu sesli söyler. Ardından mikrofonu 5 saniyelik bölümlerle dinler. Sohbet başlatmak için cümlene “Bilgisayar” diye seslenerek başla; ör. “Selam bilgisayar, nasılsın?” Tanımlı eylem komutlarını “Bilgisayar” kelimesiyle veya onsuz söyleyebilirsin (ör. “Bilgisayar, İndirilenleri aç”). Asistan komutu tekrarlar ve “evet” onayı gelmeden eylemi yapmaz. “Hayır” komutu iptal eder. “Dinlemeyi durdur” veya “dur” dinleme döngüsünü kapatır; durma isteği geçerli 5 saniyelik kayıt bölümü bitince uygulanır.
+Uygulama açıldığında konuşma modeli hazırlanır ve asistan hazır olduğunu sesli söyler. Ardından mikrofonu 5 saniyelik bölümlerle dinler. Sohbet başlatmak için “Bilgisayar”, “computer” veya “assistant” gibi bir seslenmeyle başla; ör. “Hello computer, how are you?” Konuşma dili otomatik algılanır. Ev klasörünü, İndirilenleri ve hesap makinesini açma eylemleri şu an Türkçe ve İngilizce komutlarla tanınır. Asistan komutu tekrarlar ve uygun dilde “evet/yes” onayı gelmeden eylemi yapmaz; “hayır/no” komutu iptal eder. “Dur”, “stop” veya “stop listening” dinleme döngüsünü kapatır.
 
 Sürekli mod yalnızca uygulama açıkken aktiftir. Her kayıt bölümü geçici dosyada tutulur ve tanıma bitince silinir. Dosya açma, kurulu uygulama başlatma ve diğer eylemler dışındaki istekler bilgisayar komutu olarak yürütülmez. Bu mod sık sık yerel konuşma tanıma yaptığı için bilgisayarın işlemcisini meşgul edebilir.
